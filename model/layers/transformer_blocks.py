@@ -78,6 +78,13 @@ class Block(nn.Module):
         mask: Optional[Tensor] = None,
         key_padding_mask: Optional[Tensor] = None,
     ):
+        # Prevent all-masked rows: softmax(-inf,...,-inf)=NaN, and NaN attn×0 grad=NaN (IEEE754)
+        if key_padding_mask is not None and key_padding_mask.any():
+            all_masked = key_padding_mask.all(dim=-1)  # [B]
+            if all_masked.any():
+                kpm = key_padding_mask.clone()
+                kpm[all_masked, 0] = False  # force position 0 valid for fully-masked rows
+                key_padding_mask = kpm
         src2 = self.norm1(src)
         src2 = self.attn(
             query=src2,
@@ -86,6 +93,8 @@ class Block(nn.Module):
             attn_mask=mask,
             key_padding_mask=key_padding_mask,
         )[0]
+        # Defensive: replace any NaN in attn output with 0 (identity residual for bad tokens)
+        src2 = torch.nan_to_num(src2, nan=0.0)
         src = src + self.drop_path1(src2)
         src = src + self.drop_path2(self.mlp(self.norm2(src)))
         return src

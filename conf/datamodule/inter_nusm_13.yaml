@@ -1,0 +1,34 @@
+# Cross-domain: INTERACTION (source) -> nuScenes mini (target)
+# Temporal settings match inter_13: dt=0.1, history=0.9s (10 steps), future=3.0s (30 steps)
+# Use with: model=model_ttt_13
+_target_: datamodule.trajdata_datamodule.TrajdataDataModule
+
+train_args:
+  - data: [interaction_multi-train, interaction_single-train]
+  - data_dir: {'interaction_multi': 'datasets/interaction_multi', 'interaction_single': 'datasets/interaction_single'}
+  - dt: 0.1
+  - history: [0.9, 0.9]
+  - future: [3., 3.]
+  - ego_only: False
+  - bs: ${batch_size}
+val_args:
+  - data: [nusc_mini-mini_val]
+  - data_dir: {'nusc_mini': 'datasets/nuScenes/nuscene_mini'}
+  - dt: 0.1
+  - history: [0.9, 0.9]
+  - future: [3., 3.]
+  - ego_only: True
+  - bs: ${batch_size}
+test_args:
+  - data: [nusc_mini-mini_val]
+  - data_dir: {'nusc_mini': 'datasets/nuScenes/nuscene_mini'}
+  - dt: 0.1
+  - history: [0.9, 0.9]
+  - future: [3., 3.]
+  - ego_only: True
+  - bs: 1
+shuffle: True
+augmentations: null
+num_workers: ${num_workers}
+pin_memory: True
+test: ${test}

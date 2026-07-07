@@ -1,6 +1,42 @@
-**.pyc
+# datasets/outputs — huge, tracked separately
+datasets/
+outputs/
+unified-av-data-loader/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+pyrightconfig.json
+
+# Hydra runtime artifacts at project root
+.hydra/
+
+# Legacy code archives (pre-CUDA-fix versions kept on server for reference)
+backups/
+model_0323/
+model_0410/
+
+# Local intermediate artifacts
+backup_before_lwf_finalize/
+
+# Runtime / log files
+*.log
+*.out
+train_log.txt
+
+# Temp helper scripts (created during runs)
+lyftval_sweep_v2.sh
 tmp*
-.vscode
-datasets
-outputs
-unified-av-data-loader
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Sweep dir symlinks pointing into outputs/ (created during runs)
+sweep_*

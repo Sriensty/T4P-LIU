@@ -61,6 +61,13 @@ class AgentEmbeddingLayer(nn.Module):
 
     def forward(self, x):
         """x: [B, C, T]"""
+        # cuDNN backward for Conv1d(stride=2) requires output_len >= 2.
+        # With num_levels=3 stride-2 layers, need T >= 2**num_levels = 8.
+        orig_T = x.shape[2]
+        min_T = 2 ** self.num_levels
+        if orig_T < min_T:
+            x = F.pad(x, (0, min_T - orig_T), mode='replicate')
+
         x = self.embed(x)
 
         out = []
@@ -84,7 +91,7 @@ class AgentEmbeddingLayer(nn.Module):
 
         out = self.fpn_conv(laterals[0])
 
-        return out[:, :, -1]
+        return out[:, :, orig_T - 1]
 
 
 class ConvTokenizer(nn.Module):
@@ -189,7 +196,15 @@ class NATLayer(nn.Module):
     def forward(self, x):
         shortcut = x
         x = self.norm1(x)
+        # natten CUDA kernel corrupts memory at seq_len == 2*K*D; use 3*K*D as safe minimum
+        seq_len = x.shape[1]
+        min_len = 3 * self.attn.kernel_size * self.attn.dilation
+        pad_len = max(0, min_len - seq_len)
+        if pad_len > 0:
+            x = F.pad(x, (0, 0, 0, pad_len), mode="replicate")
         x = self.attn(x)
+        if pad_len > 0:
+            x = x[:, :seq_len, :].contiguous()
         x = shortcut + self.drop_path(x)
         x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x

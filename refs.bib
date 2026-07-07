@@ -1,0 +1,326 @@
+% ==========================================================================
+% References for T4P G-SFDA improvement (anti-forgetting + long-horizon TTT)
+% Organized by topic. Cite the ones you use; delete the rest.
+% ==========================================================================
+
+% --------------------------------------------------------------------------
+% [1] Direct baselines: T4P + Forecast-MAE backbone
+% --------------------------------------------------------------------------
+@inproceedings{park2024t4p,
+  title     = {T4P: Test-Time Training of Trajectory Prediction via Masked
+               Autoencoder and Actor-specific Token Memory},
+  author    = {Park, Daehee and Jeong, Jaeseok and Yoon, Sung-Hoon and
+               Jeong, Jaewoo and Yoon, Kuk-Jin},
+  booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and
+               Pattern Recognition (CVPR)},
+  year      = {2024},
+  eprint    = {2403.10052},
+  archivePrefix = {arXiv}
+}
+
+@inproceedings{cheng2023forecastmae,
+  title     = {Forecast-MAE: Self-supervised Pre-training for Motion
+               Forecasting with Masked Autoencoders},
+  author    = {Cheng, Jie and Mei, Xiaodong and Liu, Ming},
+  booktitle = {Proceedings of the IEEE/CVF International Conference on
+               Computer Vision (ICCV)},
+  year      = {2023}
+}
+
+% --------------------------------------------------------------------------
+% [2] G-SFDA / SFDA for semantic segmentation -- the paradigm we're porting
+% --------------------------------------------------------------------------
+@inproceedings{rkp2024,
+  title     = {Generalized Source-free Domain-adaptive Segmentation via
+               Reliable Knowledge Propagation},
+  author    = {{Anonymous}},
+  booktitle = {Proceedings of the 32nd ACM International Conference on
+               Multimedia (MM)},
+  year      = {2024}
+}
+
+@inproceedings{yang2021gsfda,
+  title     = {Generalized Source-free Domain Adaptation},
+  author    = {Yang, Shiqi and Wang, Yaxing and van de Weijer, Joost and
+               Herranz, Luis and Jui, Shangling},
+  booktitle = {Proceedings of the IEEE/CVF International Conference on
+               Computer Vision (ICCV)},
+  year      = {2021}
+}
+
+@inproceedings{huang2021hcl,
+  title     = {Model Adaptation: Historical Contrastive Learning for
+               Unsupervised Domain Adaptation without Source Data},
+  author    = {Huang, Jiaxing and Guan, Dayan and Xiao, Aoran and Lu, Shijian},
+  booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
+  year      = {2021}
+}
+
+@inproceedings{zhao2023dtst,
+  title     = {Towards Better Stability and Adaptability: Improve Online
+               Self-Training for Model Adaptation in Semantic Segmentation},
+  author    = {Zhao, Dong and Wang, Shuang and Zang, Qi and Quan, Dou and
+               Ye, Xiutiao and Jiao, Licheng},
+  booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and
+               Pattern Recognition (CVPR)},
+  year      = {2023}
+}
+
+@inproceedings{kundu2021sfdaseg,
+  title     = {Generalize then Adapt: Source-Free Domain Adaptive Semantic
+               Segmentation},
+  author    = {Kundu, Jogendra Nath and Kulkarni, Akshay and Singh, Amit and
+               Jampani, Varun and Babu, R. Venkatesh},
+  booktitle = {Proceedings of the IEEE/CVF International Conference on
+               Computer Vision (ICCV)},
+  year      = {2021}
+}
+
+% --------------------------------------------------------------------------
+% [3] Test-time adaptation / training -- closest method family
+% --------------------------------------------------------------------------
+@inproceedings{sun2020ttt,
+  title     = {Test-Time Training with Self-Supervision for Generalization
+               under Distribution Shifts},
+  author    = {Sun, Yu and Wang, Xiaolong and Liu, Zhuang and Miller, John and
+               Efros, Alexei A. and Hardt, Moritz},
+  booktitle = {International Conference on Machine Learning (ICML)},
+  year      = {2020}
+}
+
+@inproceedings{wang2021tent,
+  title     = {Tent: Fully Test-Time Adaptation by Entropy Minimization},
+  author    = {Wang, Dequan and Shelhamer, Evan and Liu, Shaoteng and
+               Olshausen, Bruno and Darrell, Trevor},
+  booktitle = {International Conference on Learning Representations (ICLR)},
+  year      = {2021}
+}
+
+@inproceedings{wang2022cotta,
+  title     = {Continual Test-Time Domain Adaptation},
+  author    = {Wang, Qin and Fink, Olga and Van Gool, Luc and Dai, Dengxin},
+  booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and
+               Pattern Recognition (CVPR)},
+  year      = {2022}
+}
+
+@inproceedings{niu2022eata,
+  title     = {Efficient Test-Time Model Adaptation without Forgetting},
+  author    = {Niu, Shuaicheng and Wu, Jiaxiang and Zhang, Yifan and
+               Chen, Yaofo and Zheng, Shijian and Zhao, Peilin and Tan, Mingkui},
+  booktitle = {International Conference on Machine Learning (ICML)},
+  year      = {2022}
+}
+
+@inproceedings{ma2023vpt,
+  title     = {When Visual Prompt Tuning Meets Source-Free Domain Adaptive
+               Semantic Segmentation},
+  author    = {Ma, Xinhong and Wang, Yiming and Liu, Hao and Guo, Tianyu and
+               Wang, Yunhe},
+  booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
+  year      = {2023}
+}
+
+% --------------------------------------------------------------------------
+% [4] Continual learning / anti-forgetting -- the LwF + EWC family
+% --------------------------------------------------------------------------
+@article{kirkpatrick2017ewc,
+  title   = {Overcoming Catastrophic Forgetting in Neural Networks},
+  author  = {Kirkpatrick, James and Pascanu, Razvan and Rabinowitz, Neil and
+             Veness, Joel and Desjardins, Guillaume and Rusu, Andrei A. and
+             Milan, Kieran and Quan, John and Ramalho, Tiago and
+             Grabska-Barwinska, Agnieszka and others},
+  journal = {Proceedings of the National Academy of Sciences (PNAS)},
+  volume  = {114},
+  number  = {13},
+  pages   = {3521--3526},
+  year    = {2017}
+}
+
+@article{li2017lwf,
+  title   = {Learning without Forgetting},
+  author  = {Li, Zhizhong and Hoiem, Derek},
+  journal = {IEEE Transactions on Pattern Analysis and Machine Intelligence
+             (TPAMI)},
+  volume  = {40},
+  number  = {12},
+  pages   = {2935--2947},
+  year    = {2017}
+}
+
+@inproceedings{shin2017dgr,
+  title     = {Continual Learning with Deep Generative Replay},
+  author    = {Shin, Hanul and Lee, Jung Kwon and Kim, Jaehong and Kim, Jiwon},
+  booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
+  year      = {2017}
+}
+
+% --------------------------------------------------------------------------
+% [5] Cross-domain / data mixing methods for adaptation
+% --------------------------------------------------------------------------
+@inproceedings{tranheden2021dacs,
+  title     = {DACS: Domain Adaptation via Cross-Domain Mixed Sampling},
+  author    = {Tranheden, Wilhelm and Olsson, Viktor and Pinto, Juliano and
+               Svensson, Lennart},
+  booktitle = {Proceedings of the IEEE/CVF Winter Conference on Applications
+               of Computer Vision (WACV)},
+  year      = {2021}
+}
+
+@inproceedings{hoyer2022daformer,
+  title     = {DAFormer: Improving Network Architectures and Training Strategies
+               for Domain-Adaptive Semantic Segmentation},
+  author    = {Hoyer, Lukas and Dai, Dengxin and Van Gool, Luc},
+  booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and
+               Pattern Recognition (CVPR)},
+  year      = {2022}
+}
+
+% --------------------------------------------------------------------------
+% [6] Trajectory diffusion models -- if you go to Direction B (generative replay)
+% --------------------------------------------------------------------------
+@inproceedings{jiang2023motiondiffuser,
+  title     = {MotionDiffuser: Controllable Multi-Agent Motion Prediction
+               using Diffusion},
+  author    = {Jiang, Chiyu Max and Cornman, Andre and Park, Cheolho and
+               Sapp, Benjamin and Zhou, Yin and Anguelov, Dragomir},
+  booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and
+               Pattern Recognition (CVPR)},
+  year      = {2023}
+}
+
+@inproceedings{zhong2023ctg,
+  title     = {Guided Conditional Diffusion for Controllable Traffic Simulation},
+  author    = {Zhong, Ziyuan and Rempe, Davis and Xu, Danfei and Chen, Yuxiao and
+               Veer, Sushant and Che, Tong and Ray, Baishakhi and Pavone, Marco},
+  booktitle = {IEEE International Conference on Robotics and Automation (ICRA)},
+  year      = {2023}
+}
+
+@inproceedings{rempe2023traceandpace,
+  title     = {Trace and Pace: Controllable Pedestrian Animation via Guided
+               Trajectory Diffusion},
+  author    = {Rempe, Davis and Luo, Zhengyi and Bin Peng, Xue and Yuan, Ye and
+               Kitani, Kris and Kreis, Karsten and Fidler, Sanja and Litany, Or},
+  booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and
+               Pattern Recognition (CVPR)},
+  year      = {2023}
+}
+
+@inproceedings{huang2023scenediffuser,
+  title     = {Diffusion-Based Generation, Optimization, and Planning in
+               3D Scenes},
+  author    = {Huang, Siyuan and Wang, Zan and Li, Puhao and Jia, Baoxiong and
+               Liu, Tengyu and Zhu, Yixin and Liang, Wei and Zhu, Song-Chun},
+  booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and
+               Pattern Recognition (CVPR)},
+  year      = {2023}
+}
+
+@inproceedings{rombach2022ldm,
+  title     = {High-Resolution Image Synthesis with Latent Diffusion Models},
+  author    = {Rombach, Robin and Blattmann, Andreas and Lorenz, Dominik and
+               Esser, Patrick and Ommer, Bj{\"o}rn},
+  booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and
+               Pattern Recognition (CVPR)},
+  year      = {2022}
+}
+
+@inproceedings{zhang2023controlnet,
+  title     = {Adding Conditional Control to Text-to-Image Diffusion Models},
+  author    = {Zhang, Lvmin and Rao, Anyi and Agrawala, Maneesh},
+  booktitle = {Proceedings of the IEEE/CVF International Conference on
+               Computer Vision (ICCV)},
+  year      = {2023}
+}
+
+@inproceedings{song2023consistency,
+  title     = {Consistency Models},
+  author    = {Song, Yang and Dhariwal, Prafulla and Chen, Mark and
+               Sutskever, Ilya},
+  booktitle = {International Conference on Machine Learning (ICML)},
+  year      = {2023}
+}
+
+% --------------------------------------------------------------------------
+% [7] Modern motion-forecasting architectures (for fair comparison / context)
+% --------------------------------------------------------------------------
+@inproceedings{salzmann2020trajectronpp,
+  title     = {Trajectron++: Dynamically-Feasible Trajectory Forecasting with
+               Heterogeneous Data},
+  author    = {Salzmann, Tim and Ivanovic, Boris and Chakravarty, Punarjay and
+               Pavone, Marco},
+  booktitle = {Proceedings of the European Conference on Computer Vision (ECCV)},
+  year      = {2020}
+}
+
+@inproceedings{nayakanti2023wayformer,
+  title     = {Wayformer: Motion Forecasting via Simple \& Efficient Attention
+               Networks},
+  author    = {Nayakanti, Nigamaa and Al-Rfou, Rami and Zhou, Aurick and
+               Goel, Kratarth and Refaat, Khaled S. and Sapp, Benjamin},
+  booktitle = {IEEE International Conference on Robotics and Automation (ICRA)},
+  year      = {2023}
+}
+
+@inproceedings{shi2022mtr,
+  title     = {Motion Transformer with Global Intention Localization and
+               Local Movement Refinement},
+  author    = {Shi, Shaoshuai and Jiang, Li and Dai, Dengxin and Schiele, Bernt},
+  booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
+  year      = {2022}
+}
+
+@inproceedings{zhou2023qcnet,
+  title     = {Query-Centric Trajectory Prediction},
+  author    = {Zhou, Zikang and Wang, Jianping and Li, Yung-Hui and Huang, Yu-Kai},
+  booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and
+               Pattern Recognition (CVPR)},
+  year      = {2023}
+}
+
+@inproceedings{vu2019advent,
+  title     = {ADVENT: Adversarial Entropy Minimization for Domain Adaptation
+               in Semantic Segmentation},
+  author    = {Vu, Tuan-Hung and Jain, Himalaya and Bucher, Maxime and
+               Cord, Matthieu and P{\'e}rez, Patrick},
+  booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and
+               Pattern Recognition (CVPR)},
+  year      = {2019}
+}
+
+% --------------------------------------------------------------------------
+% [8] Datasets used by T4P (and you)
+% --------------------------------------------------------------------------
+@inproceedings{caesar2020nuscenes,
+  title     = {nuScenes: A Multimodal Dataset for Autonomous Driving},
+  author    = {Caesar, Holger and Bankiti, Varun and Lang, Alex H. and
+               Vora, Sourabh and Liong, Venice Erin and Xu, Qiang and
+               Krishnan, Anush and Pan, Yu and Baldan, Giancarlo and
+               Beijbom, Oscar},
+  booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and
+               Pattern Recognition (CVPR)},
+  year      = {2020}
+}
+
+@inproceedings{houston2021lyft,
+  title     = {One Thousand and One Hours: Self-driving Motion Prediction
+               Dataset},
+  author    = {Houston, John and Zuidhof, Guido and Bergamini, Luca and
+               Ye, Yawei and Chen, Long and Jain, Ashesh and Omari, Sammy and
+               Iglovikov, Vladimir and Ondruska, Peter},
+  booktitle = {Conference on Robot Learning (CoRL)},
+  year      = {2021}
+}
+
+@article{zhan2019interaction,
+  title   = {{INTERACTION} Dataset: An {INTERnational}, Adversarial and
+             Cooperative moTION Dataset in Interactive Driving Scenarios with
+             Semantic Maps},
+  author  = {Zhan, Wei and Sun, Liting and Wang, Di and Shi, Haojie and
+             Clausse, Aubrey and Naumann, Maximilian and K{\"u}mmerle, Julius
+             and K{\"o}nigshof, Hendrik and Stiller, Christoph and
+             de La Fortelle, Arnaud and Tomizuka, Masayoshi},
+  journal = {arXiv preprint arXiv:1910.03088},
+  year    = {2019}
+}

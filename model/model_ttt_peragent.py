@@ -120,7 +120,7 @@ class ModelTTT(nn.Module):
         state_dict = {
             k[len("net.") :]: v for k, v in ckpt.items() if k.startswith("net.")
         }
-        return self.load_state_dict(state_dict=state_dict, strict=True)
+        return self.load_state_dict(state_dict=state_dict, strict=False)
 
     @staticmethod
     def agent_random_masking(
@@ -140,14 +140,14 @@ class ModelTTT(nn.Module):
             zip(fut_num_tokens, len_keeps, pred_masks)
         ):
             pred_agent_ids = agent_ids[future_pred_mask]
-            noise = torch.rand(fut_num_token, device=device)
+            noise = torch.rand(fut_num_token.item(), device=device)
             ids_shuffle = torch.argsort(noise)
-            fut_ids_keep = ids_shuffle[:len_keep]
+            fut_ids_keep = ids_shuffle[:len_keep.item()]
             fut_ids_keep = pred_agent_ids[fut_ids_keep]
             fut_keep_ids_list.append(fut_ids_keep)
 
             hist_keep_mask = torch.zeros_like(agent_ids).bool()
-            hist_keep_mask[: num_actors[i]] = True
+            hist_keep_mask[: num_actors[i].item()] = True
             hist_keep_mask[fut_ids_keep] = False
             hist_ids_keep = agent_ids[hist_keep_mask]
             hist_keep_ids_list.append(hist_ids_keep)
@@ -155,8 +155,8 @@ class ModelTTT(nn.Module):
             fut_masked_tokens.append(fut_tokens[i, fut_ids_keep])
             hist_masked_tokens.append(hist_tokens[i, hist_ids_keep])
 
-            fut_key_padding_mask.append(torch.zeros(len_keep, device=device))
-            hist_key_padding_mask.append(torch.zeros(len(hist_ids_keep), device=device))
+            fut_key_padding_mask.append(torch.zeros(len_keep, dtype=torch.bool, device=device))
+            hist_key_padding_mask.append(torch.zeros(len(hist_ids_keep), dtype=torch.bool, device=device))
 
         fut_masked_tokens = pad_sequence(fut_masked_tokens, batch_first=True)
         hist_masked_tokens = pad_sequence(hist_masked_tokens, batch_first=True)
@@ -183,13 +183,15 @@ class ModelTTT(nn.Module):
 
         x_masked, new_key_padding_mask, ids_keep_list = [], [], []
         for i, (num_token, len_keep) in enumerate(zip(num_tokens, len_keeps)):
-            noise = torch.rand(num_token, device=x.device)
+            # Get actual valid lane indices in M-space (not assumed to be at front)
+            valid_ids = torch.where(~key_padding_mask[i])[0]  # [num_token]
+            noise = torch.rand(num_token.item(), device=x.device)
             ids_shuffle = torch.argsort(noise)
 
-            ids_keep = ids_shuffle[:len_keep]
+            ids_keep = valid_ids[ids_shuffle[:len_keep.item()]]  # actual M-space indices
             ids_keep_list.append(ids_keep)
             x_masked.append(x[i, ids_keep])
-            new_key_padding_mask.append(torch.zeros(len_keep, device=x.device))
+            new_key_padding_mask.append(torch.zeros(len_keep.item(), dtype=torch.bool, device=x.device))
 
         x_masked = pad_sequence(x_masked, batch_first=True)
         new_key_padding_mask = pad_sequence(
@@ -235,7 +237,7 @@ class ModelTTT(nn.Module):
         pos_feat = torch.cat([x_centers, x_angles], dim=-1)
         pos_embed = self.pos_embed(pos_feat)
 
-        actor_type_embed = self.actor_type_embed[data["x_attr"][...,0].long()]
+        actor_type_embed = self.actor_type_embed[data["x_attr"][...,0].long().clamp(0, self.actor_type_embed.shape[0] - 1)]
         # lane_type_embed = self.lane_type_embed.repeat(B, M, 1)
         actor_feat += actor_type_embed
         lane_feat += self.lane_type_embed
@@ -412,7 +414,9 @@ class ModelTTT(nn.Module):
             "y_hat": y_hat,
             "pi": pi,
             "y_hat_others": y_hat_others,
-            "x_encoder" : x_encoder_rtn,
+            "x_encoder" : x_encoder_rtn,       # shallow (pre-blocks) — MAE reuse
+            "x_encoder_deep": x_encoder,        # deep (post-blocks + norm) — for LwF feature distill
+            "x_agent": x_agent,                 # ego deep feature — decoder input
             "lane_normalized": lane_normalized,
         }
 
@@ -441,7 +445,7 @@ class ModelTTT(nn.Module):
             future_feat = self.future_embed(future_feat.permute(0, 2, 1).contiguous())
             future_feat = future_feat.view(B, N, future_feat.shape[-1])
 
-            actor_type_embed = self.actor_type_embed[data["x_attr"][..., 0].long()]
+            actor_type_embed = self.actor_type_embed[data["x_attr"][..., 0].long().clamp(0, self.actor_type_embed.shape[0] - 1)]
             future_feat += actor_type_embed
 
             x_centers = torch.cat(
@@ -495,7 +499,7 @@ class ModelTTT(nn.Module):
             lane_feat = lane_feat.view(B, M, -1)
 
             ###
-            actor_type_embed = self.actor_type_embed[data["x_attr"][..., 0].long()]
+            actor_type_embed = self.actor_type_embed[data["x_attr"][..., 0].long().clamp(0, self.actor_type_embed.shape[0] - 1)]
 
             hist_feat += actor_type_embed
             lane_feat += self.lane_type_embed
@@ -569,23 +573,29 @@ class ModelTTT(nn.Module):
         fut_tokens = x_decoder[:, Nh : Nh + Nf]
         lane_tokens = x_decoder[:, -Nl:]
 
-        decoder_hist_token = self.history_mask_token.repeat(B, N, 1)
+        decoder_hist_token = self.history_mask_token.repeat(B, N, 1).clone()
         hist_pred_mask = ~data["x_key_padding_mask"]
         for i, idx in enumerate(hist_keep_ids_list):
-            decoder_hist_token[i, idx] = hist_tokens[i, : len(idx)]
-            hist_pred_mask[i, idx] = False
+            if len(idx) > 0:
+                idx = idx.clamp(0, N - 1)
+                decoder_hist_token[i, idx] = hist_tokens[i, : len(idx)]
+                hist_pred_mask[i, idx] = False
 
-        decoder_fut_token = self.future_mask_token.repeat(B, N, 1)
+        decoder_fut_token = self.future_mask_token.repeat(B, N, 1).clone()
         future_pred_mask = ~data["x_key_padding_mask"]
         for i, idx in enumerate(fut_keep_ids_list):
-            decoder_fut_token[i, idx] = fut_tokens[i, : len(idx)]
-            future_pred_mask[i, idx] = False
+            if len(idx) > 0:
+                idx = idx.clamp(0, N - 1)
+                decoder_fut_token[i, idx] = fut_tokens[i, : len(idx)]
+                future_pred_mask[i, idx] = False
 
-        decoder_lane_token = self.lane_mask_token.repeat(B, M, 1)
+        decoder_lane_token = self.lane_mask_token.repeat(B, M, 1).clone()
         lane_pred_mask = ~data["lane_key_padding_mask"]
         for i, idx in enumerate(lane_ids_keep_list):
-            decoder_lane_token[i, idx] = lane_tokens[i, : len(idx)]
-            lane_pred_mask[i, idx] = False
+            if len(idx) > 0:
+                idx = idx.clamp(0, M - 1)
+                decoder_lane_token[i, idx] = lane_tokens[i, : len(idx)]
+                lane_pred_mask[i, idx] = False
 
         x_decoder = torch.cat(
             [decoder_hist_token, decoder_fut_token, decoder_lane_token], dim=1
@@ -646,7 +656,7 @@ class ModelTTT(nn.Module):
             future_feat = self.future_embed(future_feat.permute(0, 2, 1).contiguous())
             future_feat = future_feat.view(B, N, future_feat.shape[-1])
 
-            actor_type_embed = self.actor_type_embed[data["x_attr"][..., 0].long()]
+            actor_type_embed = self.actor_type_embed[data["x_attr"][..., 0].long().clamp(0, self.actor_type_embed.shape[0] - 1)]
             future_feat = future_feat + actor_type_embed
 
             x_centers = torch.cat(
@@ -700,7 +710,7 @@ class ModelTTT(nn.Module):
             lane_feat = lane_feat.view(B, M, -1)
 
             ###
-            actor_type_embed = self.actor_type_embed[data["x_attr"][..., 0].long()]
+            actor_type_embed = self.actor_type_embed[data["x_attr"][..., 0].long().clamp(0, self.actor_type_embed.shape[0] - 1)]
 
             hist_feat = hist_feat + actor_type_embed
             lane_feat = lane_feat + self.lane_type_embed
@@ -774,23 +784,29 @@ class ModelTTT(nn.Module):
         fut_tokens = x_decoder[:, Nh : Nh + Nf]
         lane_tokens = x_decoder[:, -Nl:]
 
-        decoder_hist_token = self.history_mask_token.repeat(B, N, 1)
+        decoder_hist_token = self.history_mask_token.repeat(B, N, 1).clone()
         hist_pred_mask = ~data["x_key_padding_mask"]
         for i, idx in enumerate(hist_keep_ids_list):
-            decoder_hist_token[i, idx] = hist_tokens[i, : len(idx)]
-            hist_pred_mask[i, idx] = False
+            if len(idx) > 0:
+                idx = idx.clamp(0, N - 1)
+                decoder_hist_token[i, idx] = hist_tokens[i, : len(idx)]
+                hist_pred_mask[i, idx] = False
 
-        decoder_fut_token = self.future_mask_token.repeat(B, N, 1)
+        decoder_fut_token = self.future_mask_token.repeat(B, N, 1).clone()
         future_pred_mask = ~data["x_key_padding_mask"]
         for i, idx in enumerate(fut_keep_ids_list):
-            decoder_fut_token[i, idx] = fut_tokens[i, : len(idx)]
-            future_pred_mask[i, idx] = False
+            if len(idx) > 0:
+                idx = idx.clamp(0, N - 1)
+                decoder_fut_token[i, idx] = fut_tokens[i, : len(idx)]
+                future_pred_mask[i, idx] = False
 
-        decoder_lane_token = self.lane_mask_token.repeat(B, M, 1)
+        decoder_lane_token = self.lane_mask_token.repeat(B, M, 1).clone()
         lane_pred_mask = ~data["lane_key_padding_mask"]
         for i, idx in enumerate(lane_ids_keep_list):
-            decoder_lane_token[i, idx] = lane_tokens[i, : len(idx)]
-            lane_pred_mask[i, idx] = False
+            if len(idx) > 0:
+                idx = idx.clamp(0, M - 1)
+                decoder_lane_token[i, idx] = lane_tokens[i, : len(idx)]
+                lane_pred_mask[i, idx] = False
 
         x_decoder = torch.cat(
             [decoder_hist_token, decoder_fut_token, decoder_lane_token], dim=1

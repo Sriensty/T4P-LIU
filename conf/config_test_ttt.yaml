@@ -83,6 +83,29 @@ log_frequency: 50
 
 wandb: disable
 
+save_adapted: false
+
+# ---- Anti-forgetting (LwF) ----
+# 0.0 = no LwF (vanilla T4P).  Start with 0.3 for short-term, 0.5–1.0 for long.
+lwf_weight: 0.0
+# Distillation on mode probability pi; keep small. 0.05 is a good first try.
+lwf_pi_weight: 0.0
+
+# ---- Feature-level LwF (new) ----
+# Distill on encoder features instead of/in addition to trajectory outputs.
+# Idea: constrain "domain understanding" not "specific trajectory" — allows
+# target adaptation while preserving source scene understanding.
+# Start with lwf_feature_agent_weight=0.3, lwf_feature_lane_weight=0.1.
+lwf_feature_agent_weight: 0.0   # ego deep feature distill (main knob)
+lwf_feature_lane_weight: 0.0    # lane token distill (auxiliary)
+
+# ---- Long-horizon supervision weighting ----
+# Per-step loss weight = floor + gamma * (t / T), then mean-normalized.
+# gamma=0 keeps the original uniform weighting (no behavior change).
+# Recommended starting values for long-term: gamma=2.0, floor=1.0
+long_horizon_gamma: 0.0
+long_horizon_floor: 1.0
+
 desc: Ours_obs_tr_way_val_lyftsample_wo_actor_spec
 # desc: Ours_obs_tr_inter_val_nus_13_noupdate_viz_multimodal
 # desc: Ours_obs_tr_inter_val_nus_13_vizall_target

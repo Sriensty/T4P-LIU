@@ -1,0 +1,87 @@
+defaults:
+  - hydra: default
+  - datamodule: inter_13         # overridden per experiment
+  - model: model_ttt_13          # IMPORTANT: _13 variant (historical=10, future=30)
+
+seed: 1234
+monitor: val/loss
+
+data_root:
+checkpoint:
+# Default: inter-trained checkpoint (epoch=50, tr_inter_vl_inter_13)
+pretrained_weights: outputs/forecast-mae-ttt-test_False/2023-10-04/16-06-29_tr_inter_vl_inter_13/checkpoints/epoch=50.ckpt
+
+output: ${model.name}-${model.phase}
+
+# trainer
+num_workers: 4
+gpus: 1
+sync_bn: true
+batch_size: 1
+epochs: 60
+warmup_epochs: 10
+
+# optimizer
+lr: 0.0001
+weight_decay: 1e-3
+lr2: 0.01
+weight_decay2: 1e-3
+gradient_clip_val: 15
+gradient_clip_algorithm: norm
+
+blacklist: []
+whitelist: [
+  Embedding,
+  Linear,
+  Conv1d,
+  Conv2d,
+  Conv3d,
+  MultiheadAttention,
+  LSTM,
+  GRU,
+  BatchNorm1d,
+  BatchNorm2d,
+  BatchNorm3d,
+  SyncBatchNorm,
+  LayerNorm,
+]
+
+update_param: True
+
+fr_embedding: False
+fr_first_layer: False
+fr_enc_layer: False
+fr_dec_layer: False
+fr_last_fore: False
+fr_last_mae: False
+
+sep_ego: False
+update_type_embed: False
+
+limit_train_batches:
+limit_val_batches:
+limit_test_batches:
+log_model: all
+test: true
+
+# TTT frequency: set 999999 to disable, 12 for active TTT
+ttt_frequency: 999999
+ttt_real_freq: 1
+
+log_frequency: 50
+wandb: disable
+save_adapted: false
+
+# ---- Anti-forgetting (LwF) ----
+lwf_weight: 0.0
+lwf_pi_weight: 0.0
+
+# ---- Feature-level LwF ----
+lwf_feature_agent_weight: 0.0
+lwf_feature_lane_weight: 0.0
+
+# ---- Long-horizon supervision weighting ----
+long_horizon_gamma: 0.0
+long_horizon_floor: 1.0
+
+desc: inter_cross_domain_test

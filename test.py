@@ -1,4 +1,5 @@
 import os, sys
+import contextlib
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 from tqdm import tqdm
 from copy import deepcopy
@@ -61,6 +62,20 @@ def main(conf):
     model = model.to(device)
     model.eval()
     model.freeze_layers(conf)
+
+    # --- Anti-forgetting + long-horizon TTT add-ons (defaults: no-op) ---
+    # Clone the freshly-loaded source model as a frozen LwF teacher BEFORE
+    # any TTT updates touch ``model``. With weights=0 this is a no-op.
+    model.setup_lwf_teacher(
+        lwf_weight=float(getattr(conf, 'lwf_weight', 0.0)),
+        lwf_pi_weight=float(getattr(conf, 'lwf_pi_weight', 0.0)),
+        lwf_feature_agent_weight=float(getattr(conf, 'lwf_feature_agent_weight', 0.0)),
+        lwf_feature_lane_weight=float(getattr(conf, 'lwf_feature_lane_weight', 0.0)),
+    )
+    model.configure_long_horizon(
+        gamma=float(getattr(conf, 'long_horizon_gamma', 0.0)),
+        floor=float(getattr(conf, 'long_horizon_floor', 1.0)),
+    )
 
     actor_tyme_embed_clone = model.net.actor_type_embed.clone().detach()
 
@@ -165,16 +180,28 @@ def main(conf):
         optimizers[0].zero_grad()
         optimizer1.zero_grad()
 
-        output_forecast = model.net.forward_forecast_peragent_fre(test_batch)
-        output_mae = model.net.forward_mae_fre(test_batch, output_forecast)
-        output_mae.update(output_forecast)
+        # Use no_grad when TTT is effectively disabled to prevent computation
+        # graph accumulation across thousands of batches (causes OOM).
+        _fwd_ctx = torch.no_grad() if conf.ttt_frequency >= 10000 else contextlib.nullcontext()
+        with _fwd_ctx:
+            output_forecast = model.net.forward_forecast_peragent_fre(test_batch)
+            output_mae = model.net.forward_mae_fre(test_batch, output_forecast)
+            output_mae.update(output_forecast)
+
+        # Feature LwF adds x_agent/x_encoder_deep to the forecast dict; these
+        # have shape [B, N+M, D] with N+M varying per scene, so pad_sequence
+        # fails when accumulating across time steps. Skip them (LwF uses the
+        # current-step values, not the accumulated ones).
+        _SKIP_ACCUM = {"x_agent", "x_encoder_deep"}
 
         if register_maeoutput % conf.ttt_real_freq == 0:
             if len(output_mae_) == 0:
-                output_mae_.update(output_mae)
+                output_mae_.update({k: v for k, v in output_mae.items() if k not in _SKIP_ACCUM})
                 test_batch_.update(test_batch)
             else:
                 for key in output_mae_.keys():
+                    if key in _SKIP_ACCUM:
+                        continue
                     if output_mae_[key].size(0) < conf.model.target.future_steps:
                         output_mae_[key] = pad_sequence([*output_mae_[key],output_mae[key][0]], batch_first=True)
                     else:
@@ -197,6 +224,15 @@ def main(conf):
                 
                 losses = model.cal_loss_fre_obs(output_mae_, test_batch_, obs_fut_mask)
                 loss = losses['reg_loss'] + losses['mae_loss']
+
+                # LwF anchor: use current single-step batch, NOT the accumulated
+                # test_batch_. test_batch_ has ``actor_names`` from time step 0 but
+                # ``x``/masks pad_sequenced to N_max ≥ N0, so teacher forward crashes
+                # with dim mismatch (e.g. 65 vs 56). output_forecast is the current
+                # student prediction with matching shapes; use that + test_batch.
+                lwf_loss = model.compute_lwf_loss(output_forecast, test_batch, obs_fut_mask=None)
+                loss = loss + lwf_loss
+
                 loss.backward()
 
                 torch.nn.utils.clip_grad_norm_(model.parameters(), conf.gradient_clip_val)
@@ -214,6 +250,10 @@ def main(conf):
 
         bi_passed += 1
     
+    # Report LwF diagnostics (no-op when LwF is off)
+    if hasattr(model, 'report_lwf_diagnostics'):
+        model.report_lwf_diagnostics()
+
     epoch_metrics = model.val_metrics.compute()
     epoch_metrics = {str(key)+'_epoch': val for key, val in epoch_metrics.items()}
 
@@ -224,6 +264,12 @@ def main(conf):
     print('-'*30)
     for k, v in epoch_metrics.items():
         logger2.info(f'{k}: \t {v.item():.3f}')
+
+    if getattr(conf, 'save_adapted', False):
+        adapted_ckpt_path = os.path.join(output_dir, 'adapted_model.ckpt')
+        state_dict = {k: v for k, v in model.state_dict().items() if 'actor_embeds' not in k}
+        torch.save({'state_dict': state_dict}, adapted_ckpt_path)
+        print(f'Adapted model saved to: {adapted_ckpt_path}')
 
 
 if __name__ == "__main__":
