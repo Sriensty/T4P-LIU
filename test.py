@@ -71,11 +71,16 @@ def main(conf):
         lwf_pi_weight=float(getattr(conf, 'lwf_pi_weight', 0.0)),
         lwf_feature_agent_weight=float(getattr(conf, 'lwf_feature_agent_weight', 0.0)),
         lwf_feature_lane_weight=float(getattr(conf, 'lwf_feature_lane_weight', 0.0)),
+        force_clone=bool(getattr(conf, 'use_grpo', False)),
     )
     model.configure_long_horizon(
         gamma=float(getattr(conf, 'long_horizon_gamma', 0.0)),
         floor=float(getattr(conf, 'long_horizon_floor', 1.0)),
     )
+    if getattr(conf, 'use_grpo', False):
+        model.grpo_reward    = str(getattr(conf, 'grpo_reward', 'obs_ade'))
+        model.grpo_kl_beta   = float(getattr(conf, 'grpo_kl_beta', 0.1))
+        model.grpo_feat_beta = float(getattr(conf, 'grpo_feat_beta', 0.0))
 
     actor_tyme_embed_clone = model.net.actor_type_embed.clone().detach()
 
@@ -225,23 +230,43 @@ def main(conf):
                 losses = model.cal_loss_fre_obs(output_mae_, test_batch_, obs_fut_mask)
                 loss = losses['reg_loss'] + losses['mae_loss']
 
-                # LwF anchor: use current single-step batch, NOT the accumulated
-                # test_batch_. test_batch_ has ``actor_names`` from time step 0 but
-                # ``x``/masks pad_sequenced to N_max ≥ N0, so teacher forward crashes
-                # with dim mismatch (e.g. 65 vs 56). output_forecast is the current
-                # student prediction with matching shapes; use that + test_batch.
-                lwf_loss = model.compute_lwf_loss(output_forecast, test_batch, obs_fut_mask=None)
-                loss = loss + lwf_loss
+                if getattr(conf, 'use_grpo', False):
+                    # Option 2: GRPO only on actor_embeds — two-phase update.
+                    # Phase 1: main TTT loss (reg+mae) updates model weights + actor_embeds.
+                    #          No anti-forgetting term here — model weights are updated the
+                    #          same way as baseline TTT.
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), conf.gradient_clip_val)
+                    optimizers[0].step()
+                    optimizer1.step()
+                    output_mae_ = {}
+                    test_batch_ = {}
 
-                loss.backward()
-
-                torch.nn.utils.clip_grad_norm_(model.parameters(), conf.gradient_clip_val)
-
-                optimizers[0].step()
-                optimizer1.step()
-
-                output_mae_ = {}
-                test_batch_ = {}
+                    # Phase 2: GRPO reward guides actor_embeds only.
+                    #          Fresh forward pass avoids shared computation graph with
+                    #          the accumulated output_mae_ used in phase 1.
+                    #          optimizers[0] is NOT stepped → model weights unchanged by GRPO.
+                    optimizer1.zero_grad()
+                    fresh_out = model.net.forward_forecast_peragent_fre(test_batch)
+                    grpo_loss = model.compute_grpo_loss(fresh_out, test_batch, obs_fut_mask)
+                    grpo_loss.backward()
+                    optimizer1.step()
+                else:
+                    # LwF anchor: use current single-step batch, NOT the accumulated
+                    # test_batch_. test_batch_ has ``actor_names`` from time step 0 but
+                    # ``x``/masks pad_sequenced to N_max ≥ N0, so teacher forward crashes
+                    # with dim mismatch (e.g. 65 vs 56). output_forecast is the current
+                    # student prediction with matching shapes; use that + test_batch.
+                    af_loss = model.compute_lwf_loss(
+                        output_forecast, test_batch, obs_fut_mask=None
+                    )
+                    loss = loss + af_loss
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), conf.gradient_clip_val)
+                    optimizers[0].step()
+                    optimizer1.step()
+                    output_mae_ = {}
+                    test_batch_ = {}
 
             register_maeoutput += 1
 

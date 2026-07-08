@@ -9,7 +9,7 @@ monitor: val/loss
 data_root:
 checkpoint:
 # Default: inter-trained checkpoint (epoch=50, tr_inter_vl_inter_13)
-pretrained_weights: outputs/forecast-mae-ttt-test_False/2023-10-04/16-06-29_tr_inter_vl_inter_13/checkpoints/epoch=50.ckpt
+pretrained_weights: outputs/forecast-mae-ttt-test_False/2025-12-11/09-58-41_NLL_13_tr_inter_vl_lyftsample/checkpoints/epoch=1185.ckpt
 
 output: ${model.name}-${model.phase}
 
@@ -83,5 +83,11 @@ lwf_feature_lane_weight: 0.0
 # ---- Long-horizon supervision weighting ----
 long_horizon_gamma: 0.0
 long_horizon_floor: 1.0
+
+# ---- GRPO anti-forgetting (alternative to LwF) ----
+use_grpo: false
+grpo_reward: obs_ade      # "obs_ade" | "ade" | "fde"
+grpo_kl_beta: 0.1         # KL penalty weight (mode distribution)
+grpo_feat_beta: 0.0       # feature anchor weight (x_agent MSE, 0=disabled)
 
 desc: inter_cross_domain_test

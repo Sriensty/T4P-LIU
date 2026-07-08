@@ -103,6 +103,10 @@ class Trainer(pl.LightningModule):
         self.lwf_feature_lane_weight: float = 0.0    # constrain lane tokens
         self.long_horizon_gamma: float = 0.0  # 0 = uniform weights
         self.long_horizon_floor: float = 1.0  # minimum per-step weight
+        # GRPO-style anti-forgetting (alternative to LwF distillation)
+        self.grpo_reward: str    = "obs_ade"  # "obs_ade" | "ade" | "fde"
+        self.grpo_kl_beta: float = 0.1        # KL penalty weight (mode distribution)
+        self.grpo_feat_beta: float = 0.0      # feature anchor weight (x_agent MSE)
 
 
     def forward(self, data):
@@ -479,6 +483,7 @@ class Trainer(pl.LightningModule):
         lwf_pi_weight: float = 0.0,
         lwf_feature_agent_weight: float = 0.0,
         lwf_feature_lane_weight: float = 0.0,
+        force_clone: bool = False,
     ):
         """Clone the *currently-loaded* net as a frozen teacher.
 
@@ -493,6 +498,8 @@ class Trainer(pl.LightningModule):
           specific trajectory — allows target adaptation to still work.
         - ``lwf_feature_lane_weight``: distill on lane token features.
           Constrains the encoded scene representation.
+        - ``force_clone``: always create the teacher clone regardless of weights
+          (needed by GRPO which uses the teacher as a KL reference model).
         """
         self.lwf_weight = float(lwf_weight)
         self.lwf_pi_weight = float(lwf_pi_weight)
@@ -501,7 +508,7 @@ class Trainer(pl.LightningModule):
         any_on = (self.lwf_weight > 0.0 or self.lwf_pi_weight > 0.0
                   or self.lwf_feature_agent_weight > 0.0
                   or self.lwf_feature_lane_weight > 0.0)
-        if not any_on:
+        if not any_on and not force_clone:
             self._lwf_teacher = None
             return
         teacher = deepcopy(self.net)
@@ -676,6 +683,92 @@ class Trainer(pl.LightningModule):
                   f"feat_agent={float(feat_agent_lwf):.4f} "
                   f"feat_lane={float(feat_lane_lwf):.4f} "
                   f"total={self._lwf_last_loss:.4f}")
+        return total
+
+    def compute_grpo_loss(self, student_out, data, obs_fut_mask=None) -> torch.Tensor:
+        """GRPO-style TTT anti-forgetting.
+
+        Group = 6 predicted modes.  Reward = negative ADE vs observed future
+        (or teacher best-mode proxy).  Advantage = group-relative normalised
+        reward.  Policy gradient = -advantage * log_pi.
+        KL penalty on mode distribution + optional MSE on x_agent feature
+        constrain the student from drifting, preserving source-domain performance.
+        """
+        if self._lwf_teacher is None:
+            return torch.zeros((), device=next(self.parameters()).device)
+
+        try:
+            self._lwf_teacher.actor_embeds = self.net.actor_embeds
+        except Exception:
+            return torch.zeros((), device=next(self.parameters()).device)
+
+        y_hat = student_out["y_hat"]   # [1, K, T, 2]
+        pi    = student_out["pi"]      # [1, K]
+
+        reward_type = getattr(self, "grpo_reward", "obs_ade")
+
+        # Call teacher once — reuse for pi KL, feature anchor, and (ade/fde) reward
+        with torch.no_grad():
+            t_out = self._teacher_forward(data)
+
+        pi_teacher = t_out["pi"].detach()
+
+        if reward_type in ("ade", "fde"):
+            y_t    = t_out["y_hat"].detach()           # [1, K, T, 2]
+            best_t = pi_teacher.argmax(dim=-1)         # [1]
+            y_proxy = y_t[:, best_t[0]]                # [1, T, 2]
+            if reward_type == "ade":
+                dist = torch.norm(
+                    y_hat[..., :2] - y_proxy.unsqueeze(1), dim=-1
+                ).mean(-1)                             # [1, K]
+            else:
+                dist = torch.norm(
+                    y_hat[:, :, -1, :2] - y_proxy[:, -1:, :2], dim=-1
+                )                                      # [1, K]
+        else:  # "obs_ade" — use available GT from data
+            y_gt = data["y"][:, 0]                     # [1, T, 2]
+            if obs_fut_mask is not None:
+                obs = obs_fut_mask[-1].bool()          # [T]
+                if obs.any():
+                    dist = torch.norm(
+                        y_hat[:, :, obs, :2] - y_gt[:, obs].unsqueeze(1), dim=-1
+                    ).mean(-1)                         # [1, K]
+                else:
+                    dist = torch.norm(
+                        y_hat[..., :2] - y_gt.unsqueeze(1), dim=-1
+                    ).mean(-1)
+            else:
+                dist = torch.norm(
+                    y_hat[..., :2] - y_gt.unsqueeze(1), dim=-1
+                ).mean(-1)
+
+        rewards = -dist                                # [1, K]
+
+        # Group-relative advantage
+        mean_r = rewards.mean(dim=-1, keepdim=True)
+        std_r  = rewards.std(dim=-1, keepdim=True).clamp(min=1e-6)
+        adv    = (rewards - mean_r) / std_r            # [1, K]
+
+        # Policy gradient: encourage high-reward modes
+        log_pi  = F.log_softmax(pi, dim=-1)            # [1, K]
+        pg_loss = -(adv.detach() * log_pi).mean()
+
+        # KL penalty on mode distribution
+        log_pi_t = F.log_softmax(pi_teacher, dim=-1)
+        kl_loss  = F.kl_div(
+            log_pi, log_pi_t.exp(), log_target=False, reduction="batchmean"
+        )
+
+        # Feature anchor: MSE on ego encoder output (prevents encoder drift)
+        feat_loss = torch.zeros((), device=pi.device)
+        feat_beta = getattr(self, "grpo_feat_beta", 0.0)
+        if feat_beta > 0.0 and "x_agent" in student_out and "x_agent" in t_out:
+            feat_loss = F.mse_loss(
+                student_out["x_agent"], t_out["x_agent"].detach()
+            )
+
+        beta  = getattr(self, "grpo_kl_beta", 0.1)
+        total = pg_loss + beta * kl_loss + feat_beta * feat_loss
         return total
 
     def _preprocess_data(self, data):
