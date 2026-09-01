@@ -63,6 +63,17 @@ def main(conf):
     model.eval()
     model.freeze_layers(conf)
 
+    # --- Deep-feature residual adapter (defaults: no-op) ---
+    model.net.use_deep_adapter = bool(getattr(conf, 'use_deep_adapter', False))
+    model.net.deep_adapter_alpha = float(getattr(conf, 'deep_adapter_alpha', 1.0))
+    model.net.deep_adapter_detach_base = bool(getattr(conf, 'deep_adapter_detach_base', False))
+    if model.net.use_deep_adapter:
+        print(f"[Adapter] enabled: dim={model.net.deep_adapter[0].out_features} "
+              f"alpha={model.net.deep_adapter_alpha} "
+              f"detach_base={model.net.deep_adapter_detach_base} "
+              f"freeze_encoder_backbone={getattr(conf, 'freeze_encoder_backbone', False)} "
+              f"adapter_lr_scale={getattr(conf, 'adapter_lr_scale', 1.0)}")
+
     # --- Anti-forgetting + long-horizon TTT add-ons (defaults: no-op) ---
     # Clone the freshly-loaded source model as a frozen LwF teacher BEFORE
     # any TTT updates touch ``model``. With weights=0 this is a no-op.
@@ -71,7 +82,11 @@ def main(conf):
         lwf_pi_weight=float(getattr(conf, 'lwf_pi_weight', 0.0)),
         lwf_feature_agent_weight=float(getattr(conf, 'lwf_feature_agent_weight', 0.0)),
         lwf_feature_lane_weight=float(getattr(conf, 'lwf_feature_lane_weight', 0.0)),
-        force_clone=bool(getattr(conf, 'use_grpo', False)),
+        lwf_feature_full_encoder_weight=float(getattr(conf, 'lwf_feature_full_encoder_weight', 0.0)),
+        lwf_feature_shallow_weight=float(getattr(conf, 'lwf_feature_shallow_weight', 0.0)),
+        force_clone=bool(getattr(conf, 'use_grpo', False))
+                   or bool(getattr(conf, 'use_opd', False))
+                   or float(getattr(conf, 'l2sp_weight', 0.0)) > 0,
     )
     model.configure_long_horizon(
         gamma=float(getattr(conf, 'long_horizon_gamma', 0.0)),
@@ -81,6 +96,25 @@ def main(conf):
         model.grpo_reward    = str(getattr(conf, 'grpo_reward', 'obs_ade'))
         model.grpo_kl_beta   = float(getattr(conf, 'grpo_kl_beta', 0.1))
         model.grpo_feat_beta = float(getattr(conf, 'grpo_feat_beta', 0.0))
+
+    if getattr(conf, 'use_sel_lwf', False):
+        model.setup_selective_lwf_weights(
+            drift_data_path=str(conf.sel_lwf_drift_data),
+            mode=str(getattr(conf, 'sel_lwf_mode', 'source_drift_weighted')),
+            mask_ratio_threshold=float(getattr(conf, 'sel_lwf_mask_ratio', 1.2)),
+            mask_val=float(getattr(conf, 'sel_lwf_mask_val', 0.0)),
+        )
+
+    # The TTT loop's l2sp/LwF branch is an elif: if both are configured,
+    # only L2-SP actually runs and feature LwF is silently skipped.
+    _any_feat_lwf = any(float(getattr(conf, k, 0.0)) > 0.0 for k in (
+        'lwf_weight', 'lwf_pi_weight', 'lwf_feature_agent_weight',
+        'lwf_feature_lane_weight', 'lwf_feature_full_encoder_weight',
+        'lwf_feature_shallow_weight',
+    ))
+    if float(getattr(conf, 'l2sp_weight', 0.0)) > 0 and _any_feat_lwf:
+        print("[WARN] l2sp_weight>0 AND a lwf_*_weight>0 are both set — "
+              "only the L2-SP branch runs in the TTT loop (elif), LwF is skipped.")
 
     actor_tyme_embed_clone = model.net.actor_type_embed.clone().detach()
 
@@ -231,38 +265,62 @@ def main(conf):
                 loss = losses['reg_loss'] + losses['mae_loss']
 
                 if getattr(conf, 'use_grpo', False):
-                    # Option 2: GRPO only on actor_embeds — two-phase update.
-                    # Phase 1: main TTT loss (reg+mae) updates model weights + actor_embeds.
-                    #          No anti-forgetting term here — model weights are updated the
-                    #          same way as baseline TTT.
-                    loss.backward()
+                    # GRPO as the sole TTT loss.
+                    # No reg+mae — reward (obs_ade) drives target adaptation,
+                    # KL against frozen reference model prevents source forgetting.
+                    # Both forces point in consistent directions: no cancellation.
+                    grpo_loss = model.compute_grpo_loss(
+                        output_forecast, test_batch, obs_fut_mask
+                    )
+                    grpo_loss.backward()
                     torch.nn.utils.clip_grad_norm_(model.parameters(), conf.gradient_clip_val)
+                    if model.net.use_deep_adapter:
+                        model.net._last_adapter_grad_norm = model.net.adapter_grad_norm()
                     optimizers[0].step()
                     optimizer1.step()
                     output_mae_ = {}
                     test_batch_ = {}
-
-                    # Phase 2: GRPO reward guides actor_embeds only.
-                    #          Fresh forward pass avoids shared computation graph with
-                    #          the accumulated output_mae_ used in phase 1.
-                    #          optimizers[0] is NOT stepped → model weights unchanged by GRPO.
-                    optimizer1.zero_grad()
-                    fresh_out = model.net.forward_forecast_peragent_fre(test_batch)
-                    grpo_loss = model.compute_grpo_loss(fresh_out, test_batch, obs_fut_mask)
-                    grpo_loss.backward()
-                    optimizer1.step()
                 else:
                     # LwF anchor: use current single-step batch, NOT the accumulated
                     # test_batch_. test_batch_ has ``actor_names`` from time step 0 but
                     # ``x``/masks pad_sequenced to N_max ≥ N0, so teacher forward crashes
                     # with dim mismatch (e.g. 65 vs 56). output_forecast is the current
                     # student prediction with matching shapes; use that + test_batch.
-                    af_loss = model.compute_lwf_loss(
-                        output_forecast, test_batch, obs_fut_mask=None
-                    )
-                    loss = loss + af_loss
+                    if getattr(conf, 'use_opd', False):
+                        # On-Policy Distillation: teacher evaluates student's own
+                        # generated trajectories (GKD-style, arXiv:2604.07944).
+                        af_loss = model.compute_opd_loss(
+                            output_forecast, test_batch,
+                            sigma=float(getattr(conf, 'opd_sigma', 2.0)),
+                        )
+                        loss = loss + float(getattr(conf, 'opd_weight', 0.003)) * af_loss
+                    elif getattr(conf, 'use_sel_lwf', False):
+                        # Selective feature LwF: per-dimension weighted MSE on x_agent.
+                        af_loss = model.compute_selective_lwf_loss(
+                            output_forecast, test_batch, obs_fut_mask=None
+                        )
+                        loss = loss + af_loss
+                    elif float(getattr(conf, 'l2sp_weight', 0.0)) > 0:
+                        # L2-SP: keep encoder params close to frozen source init.
+                        af_loss = model.compute_l2sp_loss()
+                        loss = loss + float(conf.l2sp_weight) * af_loss
+                    else:
+                        # Feature-level LwF (default anti-forgetting).
+                        af_loss = model.compute_lwf_loss(
+                            output_forecast, test_batch, obs_fut_mask=None
+                        )
+                        loss = loss + af_loss
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(model.parameters(), conf.gradient_clip_val)
+                    if model.net.use_deep_adapter:
+                        model.net._last_adapter_grad_norm = model.net.adapter_grad_norm()
+                        _adc = getattr(model.net, '_adapter_diag_call_count', 0) + 1
+                        model.net._adapter_diag_call_count = _adc
+                        if _adc <= 3 or _adc % 50 == 0:
+                            print(f"[Adapter-TTT] update#{_adc} (bi={bi}): "
+                                  f"delta_norm={model.net._last_adapter_delta_norm:.3e} "
+                                  f"grad_norm={model.net._last_adapter_grad_norm:.3e} "
+                                  f"param_norm={model.net.adapter_param_norm():.3e}")
                     optimizers[0].step()
                     optimizer1.step()
                     output_mae_ = {}
@@ -272,6 +330,15 @@ def main(conf):
 
         metrics = model.val_metrics(output_forecast, test_batch["y"][:, 0])
         logger.log_metrics(metrics, bi)
+        if model.net.use_deep_adapter:
+            _dn = model.net._last_adapter_delta_norm
+            _gn = model.net._last_adapter_grad_norm
+            _pn = model.net.adapter_param_norm()
+            logger.log_metrics({
+                'adapter_delta_norm': _dn,
+                'adapter_grad_norm': _gn,
+                'adapter_param_norm': _pn,
+            }, bi)
 
         bi_passed += 1
     

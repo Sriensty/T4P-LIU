@@ -17,6 +17,7 @@ target:
   loss_weight: [1., 1.]
   forecast_loss_weight: [1., 1., 1.]
   mae_loss_weight: [1.0, 1.0, 0.35]
+  deep_adapter_dim: 32
   lr: ${lr}
   weight_decay: ${weight_decay}
   lr2: ${lr2}

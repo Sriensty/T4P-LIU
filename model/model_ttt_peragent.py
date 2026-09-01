@@ -25,13 +25,32 @@ class ModelTTT(nn.Module):
         lane_mask_ratio: float = 0.5,
         history_steps: int = 50,
         future_steps: int = 60,
+        deep_adapter_dim: int = 32,
     ) -> None:
         super().__init__()
 
         self.embed_dim = embed_dim
         self.actor_mask_ratio = actor_mask_ratio
         self.lane_mask_ratio = lane_mask_ratio
-        
+
+        # ----- Deep-feature residual adapter (target-specific residual on
+        # top of the shared/LwF-constrained deep encoder feature) -----
+        self.deep_adapter = nn.Sequential(
+            nn.Linear(embed_dim, deep_adapter_dim),
+            nn.ReLU(),
+            nn.Linear(deep_adapter_dim, embed_dim),
+        )
+        self.use_deep_adapter: bool = False
+        self.deep_adapter_alpha: float = 1.0
+        # When True, the residual-add uses base.detach() as its input so
+        # downstream task losses (reg/mae) cannot backprop into the encoder
+        # through the adapter's residual connection — isolates "what the
+        # adapter alone can learn" from "encoder continuing to drift".
+        self.deep_adapter_detach_base: bool = False
+        self._last_adapter_delta_norm: float = 0.0
+        self._last_adapter_param_norm: float = 0.0
+        self._last_adapter_grad_norm: float = 0.0
+
 
         self.hist_embed = AgentEmbeddingLayer(4, 32, drop_path_rate=drop_path)
         self.future_embed = AgentEmbeddingLayer(3, 32, drop_path_rate=drop_path)
@@ -106,6 +125,13 @@ class ModelTTT(nn.Module):
 
         self.apply(self._init_weights)
 
+        # Zero-init the adapter's last layer AFTER the generic xavier pass
+        # above (which would otherwise also hit this Sequential), so the
+        # adapter outputs delta=0 at initialization: with the adapter
+        # enabled, initial behavior is identical to vanilla T4P.
+        nn.init.zeros_(self.deep_adapter[-1].weight)
+        nn.init.zeros_(self.deep_adapter[-1].bias)
+
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
             torch.nn.init.xavier_uniform_(m.weight)
@@ -121,6 +147,58 @@ class ModelTTT(nn.Module):
             k[len("net.") :]: v for k, v in ckpt.items() if k.startswith("net.")
         }
         return self.load_state_dict(state_dict=state_dict, strict=False)
+
+    def _apply_deep_adapter(self, x):
+        """Applies the shared deep-feature residual adapter.
+
+        Returns (x_lwf_anchor, x_decoder_input):
+          - x_lwf_anchor: the original ``x``, always full-grad and untouched
+            by the adapter — used as the "base" feature for feature-level
+            LwF (x_encoder_deep / x_agent), so LwF continues to constrain
+            the shared representation, not the target-specific residual.
+          - x_decoder_input: base + alpha * delta, fed to the decoder /
+            dense_predictor / MAE decoder_embed. When
+            ``deep_adapter_detach_base`` is set, this is disconnected from
+            the encoder graph so task losses only train the adapter.
+        """
+        if not self.use_deep_adapter:
+            return x, x
+
+        base_in = x.detach() if self.deep_adapter_detach_base else x
+        delta = self.deep_adapter(base_in)
+        adapted = base_in + self.deep_adapter_alpha * delta
+
+        dn = delta.detach().norm(dim=-1).mean().item()
+        pn = self.adapter_param_norm()
+        self._last_adapter_delta_norm = dn
+        self._last_adapter_param_norm = pn
+        self._adapter_call_count = getattr(self, '_adapter_call_count', 0) + 1
+        c = self._adapter_call_count
+        if c <= 3 or c % 200 == 0:
+            print(f"[Adapter] call#{c}: delta_norm={dn:.3e} "
+                  f"param_norm={pn:.3e} "
+                  f"alpha={self.deep_adapter_alpha} "
+                  f"detach_base={self.deep_adapter_detach_base}")
+        return x, adapted
+
+    def adapter_param_norm(self) -> float:
+        """L2 norm of all deep_adapter parameters (grad-independent)."""
+        with torch.no_grad():
+            sq = torch.zeros((), device=next(self.deep_adapter.parameters()).device)
+            for p in self.deep_adapter.parameters():
+                sq = sq + p.detach().pow(2).sum()
+        return float(sq.sqrt().item())
+
+    def adapter_grad_norm(self) -> float:
+        """L2 norm of deep_adapter parameter gradients. Call after
+        ``loss.backward()`` and before ``optimizer.zero_grad()``; returns
+        0.0 if no gradient has been computed yet (e.g. adapter disabled or
+        its loss path was pruned by autograd)."""
+        sq = 0.0
+        for p in self.deep_adapter.parameters():
+            if p.grad is not None:
+                sq += p.grad.detach().pow(2).sum().item()
+        return sq ** 0.5
 
     @staticmethod
     def agent_random_masking(
@@ -404,19 +482,25 @@ class ModelTTT(nn.Module):
             x_encoder = blk(x_encoder, key_padding_mask=key_padding_mask)
         x_encoder = self.norm(x_encoder)
 
-        x_agent = x_encoder[:, 0]
-        y_hat, pi = self.decoder(x_agent)
+        # x_encoder_base: shared/LwF-anchored deep feature (unchanged).
+        # x_encoder_adapted: base + alpha * adapter(base) — feeds the
+        # decoder / dense_predictor. Identical to x_encoder_base when
+        # use_deep_adapter=False (no behavior change for existing configs).
+        x_encoder_base, x_encoder_adapted = self._apply_deep_adapter(x_encoder)
 
-        x_others = x_encoder[:, 1:N]
-        y_hat_others = self.dense_predictor(x_others).view(B, -1, self.future_steps, 2)
+        x_agent_adapted = x_encoder_adapted[:, 0]
+        y_hat, pi = self.decoder(x_agent_adapted)
+
+        x_others_adapted = x_encoder_adapted[:, 1:N]
+        y_hat_others = self.dense_predictor(x_others_adapted).view(B, -1, self.future_steps, 2)
 
         return {
             "y_hat": y_hat,
             "pi": pi,
             "y_hat_others": y_hat_others,
             "x_encoder" : x_encoder_rtn,       # shallow (pre-blocks) — MAE reuse
-            "x_encoder_deep": x_encoder,        # deep (post-blocks + norm) — for LwF feature distill
-            "x_agent": x_agent,                 # ego deep feature — decoder input
+            "x_encoder_deep": x_encoder_base,   # deep base (post-blocks + norm) — LwF anchor
+            "x_agent": x_encoder_base[:, 0],    # ego deep base feature — LwF anchor
             "lane_normalized": lane_normalized,
         }
 
@@ -771,6 +855,11 @@ class ModelTTT(nn.Module):
         for blk in self.blocks:
             x = blk(x, key_padding_mask=key_padding_mask)
         x = self.norm(x)
+        # Same shared adapter as the forecast path - tests whether
+        # MAE-driven target adaptation can be routed through the residual
+        # branch instead of the shared encoder. MAE path has no LwF anchor
+        # on this feature, so only the adapted value is needed.
+        _, x = self._apply_deep_adapter(x)
 
         # decoding
         x_decoder = self.decoder_embed(x)

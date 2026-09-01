@@ -42,6 +42,7 @@ class Trainer(pl.LightningModule):
         loss_weight: List[float] = [1.0, 1.0],
         forecast_loss_weight: List[float] = [1.0, 1.0, 1.0],
         mae_loss_weight: List[float] = [1.0, 1.0, 0.35],
+        deep_adapter_dim: int = 32,
     ) -> None:
         super(Trainer, self).__init__()
         self.warmup_epochs = warmup_epochs
@@ -69,6 +70,7 @@ class Trainer(pl.LightningModule):
             lane_mask_ratio=lane_mask_ratio,
             history_steps=historical_steps,
             future_steps=future_steps,
+            deep_adapter_dim=deep_adapter_dim,
         )
 
         if pretrained_weights is not None:
@@ -101,6 +103,8 @@ class Trainer(pl.LightningModule):
         # from "target-specific output" so target adaptation is less punished).
         self.lwf_feature_agent_weight: float = 0.0   # constrain ego deep feature
         self.lwf_feature_lane_weight: float = 0.0    # constrain lane tokens
+        self.lwf_feature_full_encoder_weight: float = 0.0  # all x_encoder_deep tokens
+        self.lwf_feature_shallow_weight: float = 0.0       # x_encoder (pre-blocks)
         self.long_horizon_gamma: float = 0.0  # 0 = uniform weights
         self.long_horizon_floor: float = 1.0  # minimum per-step weight
         # GRPO-style anti-forgetting (alternative to LwF distillation)
@@ -483,6 +487,8 @@ class Trainer(pl.LightningModule):
         lwf_pi_weight: float = 0.0,
         lwf_feature_agent_weight: float = 0.0,
         lwf_feature_lane_weight: float = 0.0,
+        lwf_feature_full_encoder_weight: float = 0.0,
+        lwf_feature_shallow_weight: float = 0.0,
         force_clone: bool = False,
     ):
         """Clone the *currently-loaded* net as a frozen teacher.
@@ -505,9 +511,13 @@ class Trainer(pl.LightningModule):
         self.lwf_pi_weight = float(lwf_pi_weight)
         self.lwf_feature_agent_weight = float(lwf_feature_agent_weight)
         self.lwf_feature_lane_weight = float(lwf_feature_lane_weight)
+        self.lwf_feature_full_encoder_weight = float(lwf_feature_full_encoder_weight)
+        self.lwf_feature_shallow_weight = float(lwf_feature_shallow_weight)
         any_on = (self.lwf_weight > 0.0 or self.lwf_pi_weight > 0.0
                   or self.lwf_feature_agent_weight > 0.0
-                  or self.lwf_feature_lane_weight > 0.0)
+                  or self.lwf_feature_lane_weight > 0.0
+                  or self.lwf_feature_full_encoder_weight > 0.0
+                  or self.lwf_feature_shallow_weight > 0.0)
         if not any_on and not force_clone:
             self._lwf_teacher = None
             return
@@ -561,7 +571,9 @@ class Trainer(pl.LightningModule):
         self._lwf_call_count = getattr(self, '_lwf_call_count', 0) + 1
         any_active = (self.lwf_weight > 0.0 or self.lwf_pi_weight > 0.0
                       or self.lwf_feature_agent_weight > 0.0
-                      or self.lwf_feature_lane_weight > 0.0)
+                      or self.lwf_feature_lane_weight > 0.0
+                      or self.lwf_feature_full_encoder_weight > 0.0
+                      or self.lwf_feature_shallow_weight > 0.0)
         if self._lwf_teacher is None or not any_active:
             self._lwf_skipped_reason = (
                 'teacher_is_None' if self._lwf_teacher is None else 'all_weights_zero'
@@ -671,10 +683,28 @@ class Trainer(pl.LightningModule):
                     denom = valid.sum().clamp_min(1.0)
                     feat_lane_lwf = ((f_s - f_t).pow(2) * valid).sum() / (denom * f_s.shape[-1])
 
+        feat_full_enc_lwf = torch.zeros((), device=reg_lwf.device)
+        if (self.lwf_feature_full_encoder_weight > 0.0
+                and "x_encoder_deep" in student_out
+                and "x_encoder_deep" in teacher_out):
+            f_s = student_out["x_encoder_deep"]           # [B, N_tokens, D]
+            f_t = teacher_out["x_encoder_deep"].detach()
+            feat_full_enc_lwf = F.mse_loss(f_s, f_t)
+
+        feat_shallow_lwf = torch.zeros((), device=reg_lwf.device)
+        if (self.lwf_feature_shallow_weight > 0.0
+                and "x_encoder" in student_out
+                and "x_encoder" in teacher_out):
+            f_s = student_out["x_encoder"]                # [B, N_tokens, D]
+            f_t = teacher_out["x_encoder"].detach()
+            feat_shallow_lwf = F.mse_loss(f_s, f_t)
+
         total = (self.lwf_weight * reg_lwf
                  + self.lwf_pi_weight * pi_lwf
                  + self.lwf_feature_agent_weight * feat_agent_lwf
-                 + self.lwf_feature_lane_weight * feat_lane_lwf)
+                 + self.lwf_feature_lane_weight * feat_lane_lwf
+                 + self.lwf_feature_full_encoder_weight * feat_full_enc_lwf
+                 + self.lwf_feature_shallow_weight * feat_shallow_lwf)
         self._lwf_last_loss = float(total.detach().item())
         self._lwf_skipped_reason = None  # success
         if self._lwf_call_count <= 3:
@@ -682,8 +712,147 @@ class Trainer(pl.LightningModule):
                   f"reg={float(reg_lwf):.4f} pi={float(pi_lwf):.4f} "
                   f"feat_agent={float(feat_agent_lwf):.4f} "
                   f"feat_lane={float(feat_lane_lwf):.4f} "
+                  f"feat_full_enc={float(feat_full_enc_lwf):.4f} "
+                  f"feat_shallow={float(feat_shallow_lwf):.4f} "
                   f"total={self._lwf_last_loss:.4f}")
         return total
+
+    # ------------------------------------------------------------------
+    # Selective feature-level LwF
+    # ------------------------------------------------------------------
+
+    def setup_selective_lwf_weights(
+        self,
+        drift_data_path: str,
+        mode: str = "source_drift_weighted",
+        mask_ratio_threshold: float = 1.2,
+        mask_val: float = 0.0,
+    ) -> None:
+        """Precompute per-dimension LwF weights from a drift_data.npz file.
+
+        Three modes
+        -----------
+        source_drift_weighted      w_d ∝ source_drift_d
+        source_dominant_weighted   w_d ∝ max(source_drift_d − target_drift_d, 0)
+        target_adaptive_masked     source-weighted but zero/small on dims where
+                                   tgt_drift / src_drift > mask_ratio_threshold
+        All modes are normalised so mean(w_dim) = 1.
+        """
+        import numpy as np
+        d = np.load(drift_data_path, allow_pickle=True)
+        # drift_src/drift_tgt: shape (n_snapshots, D) — take the last snapshot
+        # (post-TTT) which gives per-dimension total drift from the baseline.
+        src = d['drift_src'][-1].astype(np.float32)   # [D]
+        tgt = d['drift_tgt'][-1].astype(np.float32)   # [D]
+
+        eps = 1e-8
+        if mode == "source_drift_weighted":
+            w = src.copy()
+        elif mode == "source_dominant_weighted":
+            w = np.maximum(src - tgt, 0.0)
+        elif mode == "target_adaptive_masked":
+            ratio = tgt / (src + eps)
+            w = src.copy()
+            w[ratio > mask_ratio_threshold] = float(mask_val)
+        else:
+            raise ValueError(f"Unknown sel_lwf_mode: {mode!r}")
+
+        mean_w = float(w.mean())
+        if mean_w < eps:
+            w = np.ones_like(w)          # degenerate fallback: uniform
+        else:
+            w = w / mean_w               # normalise: mean(w_dim) = 1
+
+        n_masked = int((w < eps).sum())
+        self._sel_lwf_w_dim = torch.from_numpy(w)   # moved to device on use
+        self._sel_lwf_mode = mode
+        print(f"[SelLwF] setup | mode={mode} | D={len(w)} | "
+              f"max_w={w.max():.3f} | n_zeroed={n_masked}")
+
+    def compute_selective_lwf_loss(
+        self, student_out, data, obs_fut_mask=None
+    ) -> torch.Tensor:
+        """Selective feature LwF: per-dimension weighted MSE on x_agent.
+
+        Uses self._sel_lwf_w_dim [D] set by setup_selective_lwf_weights().
+        The overall scale is still governed by lwf_feature_agent_weight so
+        the existing hyper-parameter stays valid.
+        """
+        dev = next(self.parameters()).device
+        zero = torch.zeros((), device=dev)
+
+        if self._lwf_teacher is None or not hasattr(self, '_sel_lwf_w_dim'):
+            return zero
+        if self.lwf_feature_agent_weight <= 0.0:
+            return zero
+
+        try:
+            self._lwf_teacher.actor_embeds = self.net.actor_embeds
+        except Exception:
+            return zero
+
+        # shape guard (same as compute_lwf_loss)
+        names = data.get("actor_names")
+        xkpm = data.get("x_key_padding_mask")
+        if names is not None and xkpm is not None and hasattr(xkpm, "shape"):
+            try:
+                if len(names[0]) != xkpm.shape[-1]:
+                    return zero
+            except Exception:
+                pass
+
+        try:
+            with torch.no_grad():
+                teacher_out = self._teacher_forward(data)
+        except Exception:
+            return zero
+
+        if "x_agent" not in student_out or "x_agent" not in teacher_out:
+            return zero
+
+        f_s = student_out["x_agent"]           # [B, D]
+        f_t = teacher_out["x_agent"].detach()  # [B, D]
+
+        w = self._sel_lwf_w_dim.to(dev)        # [D]
+        # weighted MSE — broadcast w over batch dimension
+        sel_loss = (w * (f_s - f_t).pow(2)).mean()
+
+        total = self.lwf_feature_agent_weight * sel_loss
+
+        # diagnostics (first 3 calls + every 200 thereafter)
+        self._sel_lwf_call_count = getattr(self, '_sel_lwf_call_count', 0) + 1
+        n = self._sel_lwf_call_count
+        if n <= 3 or n % 200 == 0:
+            n_masked = int((w < 1e-6).sum().item())
+            print(f"[SelLwF] call#{n}: loss={float(total):.4f} "
+                  f"mean_w={float(w.mean()):.3f} max_w={float(w.max()):.3f} "
+                  f"n_zeroed={n_masked}")
+
+        return total
+
+    def compute_l2sp_loss(self) -> torch.Tensor:
+        """L2-SP regularisation: keep net.blocks.* + net.norm.* close to source init."""
+        dev = next(self.parameters()).device
+        if self._lwf_teacher is None:
+            return torch.zeros((), device=dev)
+
+        total = torch.zeros((), device=dev)
+        n = 0
+        ref = dict(self._lwf_teacher.named_parameters())
+        for name, param in self.net.named_parameters():
+            if 'blocks.' not in name and not name.startswith('norm.'):
+                continue
+            if name not in ref:
+                continue
+            total = total + (param - ref[name].detach()).pow(2).sum()
+            n += param.numel()
+
+        loss = total / max(n, 1)
+        self._l2sp_call_count = getattr(self, '_l2sp_call_count', 0) + 1
+        c = self._l2sp_call_count
+        if c <= 3 or c % 200 == 0:
+            print(f"[L2SP] call#{c}: loss={float(loss):.6f} n_enc_params={n}")
+        return loss
 
     def compute_grpo_loss(self, student_out, data, obs_fut_mask=None) -> torch.Tensor:
         """GRPO-style TTT anti-forgetting.
@@ -770,6 +939,64 @@ class Trainer(pl.LightningModule):
         beta  = getattr(self, "grpo_kl_beta", 0.1)
         total = pg_loss + beta * kl_loss + feat_beta * feat_loss
         return total
+
+    def compute_opd_loss(self, student_out, data, sigma: float = 2.0) -> torch.Tensor:
+        """On-Policy Distillation (OPD) anti-forgetting loss.
+
+        Inspired by GKD (arXiv:2604.07944): teacher evaluates the student's OWN
+        generated trajectories rather than forcing student to match teacher's output.
+
+        For each student mode k, compute its log-likelihood under the teacher's
+        Gaussian Mixture Model (GMM):
+
+            log p_teacher(ŷ_s^k) = logsumexp_j [ log π_t^j - ‖ŷ_s^k - ŷ_t^j‖² / (2σ²) ]
+
+        Loss = -Σ_k softmax(π_s)_k · log p_teacher(ŷ_s^k)
+
+        Advantage over output LwF: student is not forced to generate the EXACT same
+        trajectory as teacher; it only needs to stay within the teacher's support.
+        This allows genuine target-domain adaptation while preventing trajectories
+        that are completely implausible to the source model.
+
+        Args:
+            student_out: dict with "y_hat" [B,K,T,2] and "pi" [B,K].
+            data: current test batch (used for teacher forward pass).
+            sigma: GMM bandwidth in trajectory-space distance (meters).
+        """
+        if self._lwf_teacher is None:
+            return torch.zeros((), device=next(self.parameters()).device)
+
+        try:
+            self._lwf_teacher.actor_embeds = self.net.actor_embeds
+        except Exception:
+            return torch.zeros((), device=next(self.parameters()).device)
+
+        y_hat_s = student_out["y_hat"]  # [B, K, T, 2]
+        pi_s    = student_out["pi"]     # [B, K]
+
+        with torch.no_grad():
+            t_out = self._teacher_forward(data)
+
+        y_hat_t = t_out["y_hat"].detach()  # [B, K, T, 2]
+        pi_t    = t_out["pi"].detach()     # [B, K]
+
+        # dist_sq[b, k_s, k_t] = mean-over-T of squared L2 between student mode
+        # k_s and teacher mode k_t.  Shape: [B, K_s, K_t].
+        dist_sq = (
+            (y_hat_s.unsqueeze(2) - y_hat_t.unsqueeze(1)) ** 2
+        ).sum(-1).mean(-1)
+
+        # log p_teacher(ŷ_s^k) via numerically stable logsumexp.
+        log_pi_t = F.log_softmax(pi_t, dim=-1)          # [B, K_t]
+        log_teacher_prob = torch.logsumexp(
+            log_pi_t.unsqueeze(1) - dist_sq / (2.0 * sigma ** 2),
+            dim=-1,
+        )  # [B, K_s]
+
+        # Expected negative log-likelihood under student's current distribution.
+        pi_s_probs = F.softmax(pi_s, dim=-1)             # [B, K_s]
+        opd_loss = -(pi_s_probs * log_teacher_prob).sum(-1).mean()
+        return opd_loss
 
     def _preprocess_data(self, data):
         for key in ["x", "x_velocity_diff", "y", "x_attr", "x_centers", "x_angles",
@@ -955,14 +1182,38 @@ class Trainer(pl.LightningModule):
         assert len(inter_params) == 0
         assert len(param_dict.keys() - union_params) == 0
 
-        optim_groups = [
-            {
-                "params": [
-                    param_dict[param_name] for param_name in sorted(list(update))
-                ],
-                "weight_decay": self.weight_decay,
-            },
-        ]
+        enc_lr_scale = float(getattr(conf, 'encoder_lr_scale', 1.0))
+        adapter_lr_scale = float(getattr(conf, 'adapter_lr_scale', 1.0))
+        _adapter_names = {n for n in update if 'net.deep_adapter.' in n}
+        _enc_names = {n for n in update if ('net.blocks.' in n or n.startswith('net.norm.'))} - _adapter_names
+        _other_names = update - _enc_names - _adapter_names
+
+        if (abs(enc_lr_scale - 1.0) > 1e-6 and _enc_names) or _adapter_names:
+            optim_groups = [
+                {"params": [param_dict[n] for n in sorted(_other_names)],
+                 "weight_decay": self.weight_decay},
+            ]
+            if _enc_names:
+                g = {"params": [param_dict[n] for n in sorted(_enc_names)],
+                     "weight_decay": self.weight_decay}
+                if abs(enc_lr_scale - 1.0) > 1e-6:
+                    g["lr"] = self.lr * enc_lr_scale
+                optim_groups.append(g)
+            if _adapter_names:
+                g = {"params": [param_dict[n] for n in sorted(_adapter_names)],
+                     "weight_decay": self.weight_decay}
+                if abs(adapter_lr_scale - 1.0) > 1e-6:
+                    g["lr"] = self.lr * adapter_lr_scale
+                optim_groups.append(g)
+            print(f"[TTT] enc_lr={self.lr * enc_lr_scale:.2e} "
+                  f"adapter_lr={self.lr * adapter_lr_scale:.2e} "
+                  f"other_lr={self.lr:.2e} enc_n={len(_enc_names)} "
+                  f"adapter_n={len(_adapter_names)}")
+        else:
+            optim_groups = [
+                {"params": [param_dict[n] for n in sorted(update)],
+                 "weight_decay": self.weight_decay},
+            ]
 
         optimizer = torch.optim.AdamW(
             optim_groups, lr=self.lr, weight_decay=self.weight_decay
@@ -975,6 +1226,23 @@ class Trainer(pl.LightningModule):
             epochs=self.epochs,
         )
         return [optimizer], [scheduler]
+
+    def _resolve_freeze_block_indices(self, spec, num_blocks):
+        """Parse freeze_encoder_blocks config value into a sorted list of block indices."""
+        if spec is None:
+            return []
+        if isinstance(spec, str):
+            s = spec.strip().lower()
+            if s in ("", "none"):
+                return []
+            if s == "all":
+                return list(range(num_blocks))
+            if s.startswith("first_") and s.endswith("%"):
+                pct = float(s[len("first_"):-1]) / 100.0
+                n = round(num_blocks * pct)
+                return list(range(n))
+            raise ValueError(f"Unrecognized freeze_encoder_blocks spec: {spec!r}")
+        return sorted(int(i) for i in spec)
 
     def freeze_layers(self, conf):
         if conf.fr_embedding:
@@ -1001,6 +1269,30 @@ class Trainer(pl.LightningModule):
                 param.requires_grad = False
             for param in self.net.norm.parameters():
                 param.requires_grad = False
+
+        if getattr(conf, 'freeze_encoder_backbone', False):
+            # Distinct from fr_enc_layer to avoid coupling with unrelated
+            # experiments. Only blocks/norm stop updating — adapter,
+            # decoder, memory (actor_embeds), and MAE decoder/head are
+            # untouched and continue to update.
+            for param in self.net.blocks.parameters():
+                param.requires_grad = False
+            for param in self.net.norm.parameters():
+                param.requires_grad = False
+
+        _feb_spec = getattr(conf, 'freeze_encoder_blocks', None)
+        if _feb_spec not in (None, 'none', ''):
+            _num_blocks = len(self.net.blocks)
+            _idxs = self._resolve_freeze_block_indices(_feb_spec, _num_blocks)
+            for i in _idxs:
+                for param in self.net.blocks[i].parameters():
+                    param.requires_grad = False
+            _norm_frozen = len(_idxs) == _num_blocks
+            if _norm_frozen:
+                for param in self.net.norm.parameters():
+                    param.requires_grad = False
+            print(f"[Freeze] freeze_encoder_blocks={_feb_spec!r} -> froze blocks {_idxs} "
+                  f"(norm {'frozen' if _norm_frozen else 'trainable'})")
 
         if conf.fr_dec_layer:
             for param in self.net.decoder_embed.parameters():

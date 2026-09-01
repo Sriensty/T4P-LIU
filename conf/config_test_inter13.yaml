@@ -90,4 +90,38 @@ grpo_reward: obs_ade      # "obs_ade" | "ade" | "fde"
 grpo_kl_beta: 0.1         # KL penalty weight (mode distribution)
 grpo_feat_beta: 0.0       # feature anchor weight (x_agent MSE, 0=disabled)
 
+# ---- On-Policy Distillation (OPD) ----
+use_opd: false
+opd_weight: 0.003     # loss scale: try 0.001 / 0.003 / 0.01
+opd_sigma: 2.0        # GMM bandwidth (metres); controls teacher strictness
+
+# ---- Selective Feature LwF ----
+use_sel_lwf: false
+sel_lwf_mode: source_drift_weighted   # source_drift_weighted | source_dominant_weighted | target_adaptive_masked
+sel_lwf_drift_data: outputs/drift_analysis/drift_data.npz
+sel_lwf_mask_ratio: 1.2    # target_adaptive_masked: tgt/src ratio threshold
+sel_lwf_mask_val: 0.0      # weight assigned to masked dims (0 = full suppress)
+
+# ---- Encoder lower LR (Task 1) ----
+encoder_lr_scale: 1.0      # 1.0 = unchanged; try 0.1 / 0.01
+
+# ---- Encoder L2-SP (Task 2) ----
+l2sp_weight: 0.0           # try 1e-5 / 1e-4 / 1e-3
+
+# ---- Multi-layer feature LwF (Task 3) ----
+lwf_feature_full_encoder_weight: 0.0   # all x_encoder_deep tokens
+lwf_feature_shallow_weight: 0.0        # x_encoder pre-blocks
+
+# ---- Deep-feature residual adapter ----
+# adapter arch (Linear(embed_dim, deep_adapter_dim)->ReLU->Linear->embed_dim)
+# is set via model.target.deep_adapter_dim (default 32); these are runtime toggles.
+use_deep_adapter: false
+deep_adapter_alpha: 1.0
+deep_adapter_detach_base: false   # true = decoder/MAE input uses base.detach()+delta,
+                                  # isolating encoder from downstream task-loss gradient
+freeze_encoder_backbone: false    # true = net.blocks + net.norm frozen (requires_grad=False);
+                                  # adapter/decoder/memory/MAE decoder-head still update
+freeze_encoder_blocks: "none"     # "none" | "first_50%" | "first_75%" | "all" | explicit list, e.g. [0,1]
+adapter_lr_scale: 1.0             # LR multiplier for net.deep_adapter.* params
+
 desc: inter_cross_domain_test
